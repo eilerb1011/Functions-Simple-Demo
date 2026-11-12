@@ -4,14 +4,8 @@ spin_manifest_version = 2
 name = "weather-edge"
 version = "0.1.0"
 authors = ["beiler"]
-description = "Flattened Weather App with TTL Edge KV Paywall and Private Nested Functions"
+description = ""
 
-[application.state]
-key_value_stores = ["default", "counters"]
-
-# ----------------------------------------
-# Component 1: The Main Weather App
-# ----------------------------------------
 [[trigger.http]]
 route = "/..."
 component = "weather"
@@ -21,22 +15,22 @@ source = "target/wasm32-wasip1/release/weather.wasm"
 allowed_outbound_hosts = [
     "http://ip-api.com", 
     "https://api.weather.gov",
-    "http://trending.spin.internal" # Authorized to call the private nested component
+    "http://trending.spin.internal"
 ]
+# KV stores defined strictly at the component level
 key_value_stores = ["default", "counters"]
+
 [component.weather.build]
 command = "cargo build --target wasm32-wasip1 --release"
 watch = ["src/**/*.rs", "Cargo.toml"]
 
-# ----------------------------------------
-# Component 2: The Nested Trending API
-# ----------------------------------------
 [[trigger.http]]
-route = { private = true } # Private internal routing
+route = { private = true }
 component = "trending"
 
 [component.trending]
 source = "target/wasm32-wasip1/release/trending.wasm"
+
 [component.trending.build]
 command = "cargo build --target wasm32-wasip1 --release"
 watch = ["src/**/*.rs", "Cargo.toml"]
