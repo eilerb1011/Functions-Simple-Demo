@@ -13,3 +13,4 @@ fn handle_trending(_req: Request) -> anyhow::Result<impl IntoResponse> {
         .body(html)
         .build())
 }
+fn main() {}
