@@ -17,8 +17,8 @@ allowed_outbound_hosts = [
     "https://api.weather.gov",
     "http://trending.spin.internal"
 ]
-# KV stores defined strictly at the component level
-key_value_stores = ["default", "counters"]
+# Only the default store is declared here
+key_value_stores = ["default"]
 
 [component.weather.build]
 command = "cargo build --target wasm32-wasip1 --release"
