@@ -1,0 +1,42 @@
+spin_manifest_version = 2
+
+[application]
+name = "weather-edge"
+version = "0.1.0"
+authors = ["beiler"]
+description = "Weather App with TTL Edge KV Paywall and Private Nested Functions"
+
+[application.state]
+key_value_stores = ["default", "counters"]
+
+# ----------------------------------------
+# Component 1: The Main Weather App
+# ----------------------------------------
+[[trigger.http]]
+route = "/..."
+component = "weather"
+
+[component.weather]
+source = "target/wasm32-wasip1/release/weather.wasm"
+allowed_outbound_hosts = [
+    "http://ip-api.com", 
+    "https://api.weather.gov",
+    "http://trending.spin.internal" # Authorized to call the private nested component
+]
+key_value_stores = ["default", "counters"]
+[component.weather.build]
+command = "cargo build --target wasm32-wasip1 --release"
+watch = ["src/**/*.rs", "Cargo.toml"]
+
+# ----------------------------------------
+# Component 2: The Nested Trending API
+# ----------------------------------------
+[[trigger.http]]
+route = { private = true } # Removed from public access
+component = "trending"
+
+[component.trending]
+source = "trending/target/wasm32-wasip1/release/trending.wasm"
+[component.trending.build]
+command = "cargo build --target wasm32-wasip1 --release"
+workdir = "trending"
