@@ -37,13 +37,6 @@ struct Period {
 }
 
 #[derive(Serialize, Deserialize)]
-struct CachedData {
-    timestamp: u64,
-    forecast: NwsForecast,
-}
-
-// Track the paywall TTL
-#[derive(Serialize, Deserialize)]
 struct PaywallData {
     count: i32,
     timestamp: u64,
@@ -60,12 +53,14 @@ async fn handle_weather_request(req: Request) -> Result<impl IntoResponse> {
     let client_ip = if raw_ip.is_empty() { "local_dev" } else { raw_ip };
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
+    let store = Store::open_default()?;
+
     // ==========================================
     // 1. THE 5-MINUTE TTL EDGE PAYWALL
     // ==========================================
-    let counter_store = Store::open("counters")?;
+    let paywall_key = format!("paywall_{}", client_ip);
     
-    let mut user_data = match counter_store.get(client_ip)? {
+    let mut user_data = match store.get(&paywall_key)? {
         Some(bytes) => serde_json::from_slice::<PaywallData>(&bytes).unwrap_or(PaywallData { count: 0, timestamp: now }),
         None => PaywallData { count: 0, timestamp: now },
     };
@@ -89,10 +84,10 @@ async fn handle_weather_request(req: Request) -> Result<impl IntoResponse> {
 
     user_data.count += 1;
     let views_left = 3 - user_data.count;
-    counter_store.set(client_ip, &serde_json::to_vec(&user_data)?)?;
+    store.set(&paywall_key, &serde_json::to_vec(&user_data)?)?;
 
     // ==========================================
-    // 2. GEO-IP & WEATHER LOGIC
+    // 2. GEO-IP & SHARDED WEATHER CACHE
     // ==========================================
     let geo_url = if raw_ip.is_empty() {
         "http://ip-api.com/json/".to_string()
@@ -102,20 +97,42 @@ async fn handle_weather_request(req: Request) -> Result<impl IntoResponse> {
     let geo_res: Response = send(Request::get(geo_url)).await?;
     let geo: Geo = serde_json::from_slice(geo_res.body())?;
 
-    let cache_store = Store::open_default()?;
-    let cache_key = format!("forecast_{}", geo.zip);
-    
-    let mut final_forecast: Option<NwsForecast> = None;
+    let meta_key = format!("forecast_{}_meta", geo.zip);
+    let mut cached_periods: Vec<Period> = Vec::new();
+    let mut is_cache_valid = false;
 
-    if let Ok(Some(cached_bytes)) = cache_store.get(&cache_key) {
-        if let Ok(cached_wrapper) = serde_json::from_slice::<CachedData>(&cached_bytes) {
-            if now - cached_wrapper.timestamp < 300 {
-                final_forecast = Some(cached_wrapper.forecast);
+    // A. Check the Meta Key for freshness
+    if let Ok(Some(meta_bytes)) = store.get(&meta_key) {
+        if let Ok(timestamp_str) = std::str::from_utf8(&meta_bytes) {
+            if let Ok(timestamp) = timestamp_str.parse::<u64>() {
+                if now - timestamp < 300 {
+                    is_cache_valid = true;
+                }
             }
         }
     }
 
-    if final_forecast.is_none() {
+    // B. Reassemble from multiple keys if valid
+    if is_cache_valid {
+        for i in 0..6 {
+            let period_key = format!("forecast_{}_p{}", geo.zip, i);
+            if let Ok(Some(p_bytes)) = store.get(&period_key) {
+                if let Ok(period) = serde_json::from_slice::<Period>(&p_bytes) {
+                    cached_periods.push(period);
+                }
+            }
+        }
+        if cached_periods.len() != 6 {
+            is_cache_valid = false; // Fallback if a key is missing
+        }
+    }
+
+    // C. Cache Miss vs Cache Hit determination
+    let forecast = if is_cache_valid {
+        println!("CACHE HIT for Zip: {}", geo.zip);
+        NwsForecast { properties: NwsForecastProps { periods: cached_periods } }
+    } else {
+        println!("CACHE MISS. Fetching fresh data for Zip: {}", geo.zip);
         let points_url = format!("https://api.weather.gov/points/{},{}", geo.lat, geo.lon);
         let points_req = Request::builder().method(Method::Get).uri(points_url).header("User-Agent", "Akamai-Functions-Demo/1.0").build();
         let points_res: Response = send(points_req).await?;
@@ -123,24 +140,34 @@ async fn handle_weather_request(req: Request) -> Result<impl IntoResponse> {
 
         let forecast_req = Request::builder().method(Method::Get).uri(points.properties.forecast).header("User-Agent", "Akamai-Functions-Demo/1.0").build();
         let forecast_res: Response = send(forecast_req).await?;
-        let fresh_forecast: NwsForecast = serde_json::from_slice(forecast_res.body())?;
+        let mut fresh_forecast: NwsForecast = serde_json::from_slice(forecast_res.body())?;
 
-        let cache_wrapper = CachedData { timestamp: now, forecast: fresh_forecast.clone() };
-        cache_store.set(&cache_key, &serde_json::to_vec(&cache_wrapper)?)?;
-        final_forecast = Some(fresh_forecast);
-    }
+        // Write Meta Timestamp
+        store.set(&meta_key, now.to_string().as_bytes())?;
 
-    let forecast = final_forecast.unwrap();
+        // Write each period to its own isolated 300-byte key
+        fresh_forecast.properties.periods.truncate(6);
+        for (i, period) in fresh_forecast.properties.periods.iter().enumerate() {
+            let period_key = format!("forecast_{}_p{}", geo.zip, i);
+            let mut p_clone = period.clone();
+            if i > 0 { p_clone.detailedForecast.clear(); } // Clean up unused strings
+            store.set(&period_key, &serde_json::to_vec(&p_clone)?)?;
+        }
+        fresh_forecast
+    };
 
     // ==========================================
     // 3. PRIVATE NESTED FUNCTION CALL 
     // ==========================================
     let trending_req = Request::get("http://trending.spin.internal");
     let mut trending_html = String::new();
-    if let Ok(mut resp) = send(trending_req).await {
-        trending_html = String::from_utf8_lossy(&resp.body_mut().take().unwrap_or_default()).to_string();
+    
+    // Explicitly annotate the type so the compiler knows this returns a Response
+    let trending_res: Result<Response, _> = send(trending_req).await;
+    
+    if let Ok(resp) = trending_res {
+        trending_html = String::from_utf8_lossy(resp.body()).to_string();
     }
-
     // ==========================================
     // 4. HTML RENDERING
     // ==========================================
@@ -205,3 +232,5 @@ async fn handle_weather_request(req: Request) -> Result<impl IntoResponse> {
 
     Ok(Response::builder().status(200).header("content-type", "text/html; charset=utf-8").body(html).build())
 }
+
+fn main() {}
