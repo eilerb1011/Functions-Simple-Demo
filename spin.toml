@@ -4,7 +4,7 @@ spin_manifest_version = 2
 name = "weather-edge"
 version = "0.1.0"
 authors = ["beiler"]
-description = "Weather App with TTL Edge KV Paywall and Private Nested Functions"
+description = "Flattened Weather App with TTL Edge KV Paywall and Private Nested Functions"
 
 [application.state]
 key_value_stores = ["default", "counters"]
@@ -32,11 +32,11 @@ watch = ["src/**/*.rs", "Cargo.toml"]
 # Component 2: The Nested Trending API
 # ----------------------------------------
 [[trigger.http]]
-route = { private = true } # Removed from public access
+route = { private = true } # Private internal routing
 component = "trending"
 
 [component.trending]
-source = "trending/target/wasm32-wasip1/release/trending.wasm"
+source = "target/wasm32-wasip1/release/trending.wasm"
 [component.trending.build]
 command = "cargo build --target wasm32-wasip1 --release"
-workdir = "trending"
+watch = ["src/**/*.rs", "Cargo.toml"]
